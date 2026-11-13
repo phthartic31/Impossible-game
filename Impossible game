@@ -1,0 +1,1522 @@
+#!/usr/bin/env python3
+"""
+=====================================================================
+  BLOBBY IS DOOMED  -  an "impossible" troll platformer (Pygame)
+=====================================================================
+README
+------
+Install :  pip install pygame          (Python 3.10+)
+Run     :  python main.py
+
+Controls
+  Left / Right  or  A / D ........ move
+  Space / Up / W ................. jump (hold = higher, tap = lower)
+  R .............................. restart the current level (free)
+  M .............................. mute / unmute
+  Esc ............................ quit
+  Enter .......................... confirm on title / game-over screens
+
+Everything is drawn with pygame shapes and every sound is generated in
+code, so there are no image or sound files to download.
+
+Quick guide to the file
+  1. CONSTANTS ..... tune gravity, jump strength, speed, timings here
+  2. LEVELS ........ ASCII maps (see the legend right above them)
+  3. Classes ....... Player, Platform, Enemy (+ Walker/Bat/Dropper/Boss),
+                     Trap, Coin, Goal, Checkpoint, Particle, Game
+  4. main() ........ starts the game
+
+Trust nothing. Good luck.
+"""
+
+import array
+import math
+import random
+import sys
+
+import pygame
+
+# =====================================================================
+# 1. CONSTANTS  (change these to tune the feel of the game)
+# =====================================================================
+SCREEN_W, SCREEN_H = 960, 540
+FPS = 60
+STEP = 1.0 / FPS            # physics always runs in fixed 1/60 s steps
+TILE = 36                   # one map character = one 36x36 pixel tile
+ROWS = SCREEN_H // TILE     # maps are 15 rows tall
+
+# --- player physics (pixels and seconds) ---
+GRAVITY = 2000.0            # downward acceleration
+MAX_FALL = 900.0            # terminal falling speed
+JUMP_SPEED = 640.0          # initial jump velocity (~100 px high)
+JUMP_CUT = 2.6              # extra gravity when you let go of jump early
+MOVE_SPEED = 250.0          # top running speed
+GROUND_ACCEL = 2200.0       # how fast we speed up on the ground
+GROUND_FRICTION = 2600.0    # how fast we slow down on the ground
+AIR_ACCEL = 1500.0          # speeding up in the air
+AIR_FRICTION = 500.0        # slowing down in the air
+COYOTE_TIME = 0.10          # can still jump this long after leaving a ledge
+JUMP_BUFFER = 0.12          # a jump pressed this early before landing counts
+STOMP_BOUNCE = 480.0        # bounce after stomping an enemy
+STOMP_BOUNCE_HELD = 720.0   # bounce when jump is held while stomping
+
+# --- game rules ---
+START_LIVES = 5
+COIN_LIFE = 20              # every 20 coins = +1 life
+DEATH_TIME = 1.5            # seconds of taunt after dying
+RESPAWN_TIME = 0.9          # length of the respawn animation
+LEVEL_CLEAR_TIME = 2.2
+
+# --- trap tuning ---
+COLLAPSE_DELAY = 0.35       # collapsing plank falls this long after a step
+SLIDE_DELAY = 0.20          # sliding plank starts moving after this long
+SLIDE_SPEED = 230.0
+PIT_TRIGGER = 120           # pit-trap opens when you are this close (px)
+HIDDEN_SPIKE_TRIGGER = 46   # hidden spikes pop when you are this close (px)
+DROPPER_TRIGGER = 56
+DROPPER_GRAVITY = 4200.0
+BAT_WAKE_DISTANCE = 300
+BAT_SPEED = 85.0
+WALKER_SPEED = 55.0
+
+SOUND_ENABLED = True        # set False for a silent game
+
+# --- colours ---
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+DIRT = (120, 78, 48)
+DIRT_DARK = (92, 58, 34)
+GRASS = (76, 175, 80)
+GRASS_LIGHT = (129, 214, 104)
+BRICK = (196, 98, 58)
+BRICK_DARK = (140, 64, 36)
+PLANK = (184, 142, 82)
+PLANK_DARK = (122, 88, 46)
+USED = (110, 86, 70)
+BLOB = (70, 200, 190)
+BLOB_DARK = (30, 120, 120)
+GOLD = (255, 205, 40)
+RED = (230, 60, 60)
+HUD_TEXT = (250, 250, 250)
+
+# =====================================================================
+# 2. LEVELS  (ASCII maps - add your own at the bottom of LEVELS!)
+# =====================================================================
+# Each map is a list of strings.  One character = one tile.  Maps are
+# 15 rows tall; rows are padded with air if they are shorter.
+#
+#   .  air                      #  solid ground (grass on top)
+#   =  solid brick              @  player start
+#   F  FAKE brick (looks solid, you fall straight through it)
+#   ?  INVISIBLE block (solid, appears once you bump it)
+#   C  crumbling plank (falls shortly after you step on it)
+#   W  sliding plank (slides away shortly after you step on it)
+#   P  PIT TRAP: ground that drops away as you run towards it
+#   ^  HIDDEN spike (pops out of the floor when you get close)
+#   S  normal spike             o  coin
+#   e  walker (stomp it)        w  spiky walker (do NOT stomp it)
+#   b  bat (wakes up, chases)   d  dropper (falls from the ceiling)
+#   B  boss (final level)       K  checkpoint
+#   G  real goal flag           X  FAKE goal flag (kills you)
+#
+# 'G' / 'X' / 'K' / 'e' / 'w' / '^' / 'S' / '@' mark the tile the object
+# stands on (the bottom tile of the flag pole).
+LEVELS = [
+    {
+        "name": "Warm Up",
+        "hint": "What could possibly go wrong?",
+        "sky": ((110, 190, 250), (210, 238, 255)),
+        "map": [
+            '........................................................................................................................',
+            '........................................................................................................................',
+            '........................................................................................................................',
+            '........................................................................................................................',
+            '.................................................................................................d..d...................',
+            '........................................................................................................................',
+            '........................................................................................................................',
+            '........................................................................................................................',
+            '........................................................................................................................',
+            '...................................ooo..................................................................................',
+            '....................ooo.............?............oooo...................................................................',
+            '........ooo........==F==..........................................ooo........................................ooo........',
+            '..@...........e.......................e...K.......^^....e...............w...................K..........X..^^........G...',
+            '###########################==F==##############################PPP#############CCCCCCCCCCC###############################',
+            '###########################.....##############################PPP#############...........###############################',
+        ],
+    },
+    {
+        "name": "Trust Issues",
+        "hint": "That block looks friendly...",
+        "sky": ((250, 150, 110), (255, 222, 170)),
+        "map": [
+            '......................................................................................................................................................',
+            '......................................................................................................................................................',
+            '......................................................................................................................................................',
+            '..................................................................................................d..d..d.............................................',
+            '......................................................................................................................................................',
+            '......................................................b..............................................................b................................',
+            '..................................................b...................................................................................................',
+            '......................................................................................................................................................',
+            '......................................................................................................................................................',
+            '..........................oooooooo...................................ooo?.............................................................................',
+            '......................................................................?..ooooo........................................................................',
+            '......ooo.................==F==F==....................................................ooo.............................................................',
+            '..@........e.....e....................w.e..WW..WW..WW..WW......K..........^^^.............e.e..w...........K...................X..^^^..K........^..G..',
+            '#########################..........#######.................#######################PPP##########################CCCCCCCCCCCCC###############PPP########',
+            '#########################..........#######.................#######################PPP##########################.............###############PPP########',
+        ],
+    },
+    {
+        "name": "No Mercy",
+        "hint": "Boss ahead. Also, everything else.",
+        "sky": ((40, 30, 90), (120, 70, 140)),
+        "map": [
+            '...........................................................................................................................................................................##',
+            '...........................................................................................................................................................................##',
+            '...........................................................................................................................................................................##',
+            '..............................................................................................d.d.d.d......................................................................##',
+            '....................................................b......................................................................................................................##',
+            '..............................................b.......................................................................b....................................................##',
+            '........................................................b..................................................................................................................##',
+            '...........................................................................................................................................................................##',
+            '...........................................................................................................................................................................##',
+            '......?.............?.............................................oooooooooooo.............................................................................................##',
+            '........ooo...........oooo.................................................................................................................................................##',
+            '.....oo...........................................................==F==F==F===........ooo.............................................ooo..................................##',
+            '..@.....^^^...e...w..........e.e..w......WW..WW..WW..WW..W....K..................e..w..........^^.......K...X..^^^..........X..K......................B..............^..G..##',
+            '######################....##############...................######..............#########PPP#########################CCCCCC######################################PPP##########',
+            '######################....##############...................######..............#########PPP#########################......######################################PPP##########',
+        ],
+    },
+]
+
+# Messages shown after each kind of death
+TAUNTS = {
+    "enemy": ["Ouch! That one bites.", "You were supposed to stomp it.",
+              "Fun fact: enemies are not friends."],
+    "dropper": ["Look up next time!", "Gravity: 1   You: 0",
+                "The ceiling had other plans."],
+    "boss": ["The boss says hi.", "Try jumping on its head.",
+             "That was a boss move. For the boss."],
+    "spike": ["Spikes are sharp. Who knew?", "Pointy things hurt.",
+              "Maybe don't touch those."],
+    "hidden": ["Surprise spikes!", "The floor was lying to you.",
+               "You can't trust the floor."],
+    "pit": ["Down you go!", "Mind the gap. Or don't.",
+            "The ground left. Without notice."],
+    "fall": ["Bottomless pits are bottomless.", "Wheee... splat.",
+             "You fell for it. Literally."],
+    "fakegoal": ["That flag was a liar!", "Nope! Not the real goal.",
+                 "It said GOAL. It lied."],
+    "generic": ["Oops.", "Try again!", "That did not go well."],
+}
+
+
+# =====================================================================
+# helpers
+# =====================================================================
+def approach(value, target, amount):
+    """Move value towards target by at most amount (never overshoots)."""
+    if value < target:
+        return min(value + amount, target)
+    return max(value - amount, target)
+
+
+def lerp_color(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+class SoundBank:
+    """Generates all sound effects in code (square waves and noise)."""
+
+    def __init__(self):
+        self.enabled = SOUND_ENABLED
+        self.sounds = {}
+        if not self.enabled:
+            return
+        info = pygame.mixer.get_init()
+        if not info or info[1] != -16:
+            self.enabled = False       # no audio device / odd format
+            return
+        self.rate, _, self.channels = info
+        try:
+            self.sounds = {
+                "jump": self.tone(300, 620, 0.13, 0.22),
+                "coin": self.tone(900, 1350, 0.10, 0.22),
+                "stomp": self.tone(260, 90, 0.12, 0.30, noise=0.3),
+                "death": self.tone(420, 50, 0.55, 0.30, noise=0.45),
+                "pop": self.tone(140, 700, 0.07, 0.25),
+                "check": self.tone(520, 1040, 0.25, 0.22),
+                "win": self.tone(520, 1560, 0.55, 0.22),
+                "boss": self.tone(120, 40, 0.35, 0.35, noise=0.4),
+                "thud": self.tone(90, 40, 0.15, 0.35, noise=0.5),
+                "oneup": self.tone(700, 1400, 0.30, 0.22),
+            }
+        except Exception:                 # sound must never crash the game
+            self.enabled = False
+
+    def tone(self, f0, f1, dur, vol, noise=0.0):
+        n = int(self.rate * dur)
+        buf = array.array("h")
+        phase = 0.0
+        for i in range(n):
+            t = i / n
+            phase += (f0 + (f1 - f0) * t) / self.rate
+            wave = 1.0 if (phase % 1.0) < 0.5 else -1.0
+            if noise:
+                wave = wave * (1 - noise) + random.uniform(-1, 1) * noise
+            value = int(wave * (1 - t) * vol * 32767)
+            for _ in range(self.channels):
+                buf.append(value)
+        return pygame.mixer.Sound(buffer=buf.tobytes())
+
+    def play(self, name):
+        if self.enabled and name in self.sounds:
+            self.sounds[name].play()
+
+    def toggle(self):
+        self.enabled = not self.enabled
+        if not self.enabled:
+            pygame.mixer.stop()
+
+
+class Particle:
+    """A tiny coloured square that flies, falls and fades."""
+
+    def __init__(self, x, y, vx, vy, life, color, size, gravity=700.0):
+        self.x, self.y, self.vx, self.vy = x, y, vx, vy
+        self.life = self.max_life = life
+        self.color, self.size, self.gravity = color, size, gravity
+
+    def update(self, dt):
+        self.life -= dt
+        self.vy += self.gravity * dt
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+
+    def draw(self, surf, ox, oy):
+        s = max(1, int(self.size * self.life / self.max_life))
+        pygame.draw.rect(surf, self.color, (int(self.x + ox), int(self.y + oy), s, s))
+
+
+# =====================================================================
+# 3. GAME OBJECTS
+# =====================================================================
+class Platform:
+    """One tile of terrain.  `kind` decides how it behaves:
+
+    ground / brick .. plain solid tiles
+    fake ............ looks like a brick but is NOT solid
+    invisible ....... solid but invisible until bumped
+    collapse ........ crumbles shortly after you stand on it
+    slide ........... slides sideways after you stand on it
+    pit ............. ground that drops away when you get close
+    """
+
+    SOLID_KINDS = ("ground", "brick", "invisible", "collapse", "slide", "pit")
+
+    def __init__(self, col, row, kind, exposed=True):
+        self.kind = kind
+        self.rect = pygame.Rect(col * TILE, row * TILE, TILE, TILE)
+        self.fx, self.fy = float(self.rect.x), float(self.rect.y)
+        self.solid = kind in self.SOLID_KINDS
+        self.exposed = exposed        # nothing solid above (grass on top)
+        self.triggered = False
+        self.falling = False
+        self.timer = 0.0
+        self.vy = 0.0
+        self.dir = 1
+        self.alpha = 255
+        self.revealed = False
+        self.dead = False
+        self.group = [self]           # tiles that slide together
+
+    # ----- reactions to the player -----
+    def on_stand(self, game, player):
+        """Called every frame the player stands on this tile."""
+        if self.triggered or player.rect.bottom != self.rect.top:
+            return
+        if self.kind == "collapse":
+            self.triggered = True
+        elif self.kind == "slide":
+            direction = 1 if player.vx >= 0 else -1
+            for tile in self.group:
+                tile.triggered = True
+                tile.dir = direction
+
+    def on_bump(self, game):
+        """Called when the player bumps into this tile."""
+        if self.kind == "invisible" and not self.revealed:
+            self.revealed = True
+            game.sfx("thud")
+            game.spawn_burst(self.rect.centerx, self.rect.centery, USED, 8)
+
+    # ----- per-frame update -----
+    def update(self, game, dt):
+        player = game.player
+        if self.kind == "collapse" and self.triggered:
+            self.timer += dt
+            if self.timer >= COLLAPSE_DELAY and not self.falling:
+                self.solid, self.falling = False, True
+        elif self.kind == "slide" and self.triggered:
+            self.timer += dt
+            if self.timer >= SLIDE_DELAY:
+                self.fx += self.dir * SLIDE_SPEED * dt
+                self.rect.x = int(self.fx)
+                if self.timer > 2.2:
+                    self.dead = True
+        elif self.kind == "pit" and not self.triggered:
+            if (player.alive and
+                    abs(player.rect.centerx - self.rect.centerx) < PIT_TRIGGER):
+                self.triggered = True
+                self.solid, self.falling = False, True
+                game.sfx("pop")
+        elif self.kind == "fake" and not self.triggered:
+            if player.alive and self.rect.colliderect(player.rect):
+                self.triggered = True
+        if self.kind == "fake" and self.triggered:
+            self.alpha -= int(900 * dt)
+            if self.alpha <= 0:
+                self.dead = True
+        if self.falling:
+            self.vy += GRAVITY * dt
+            self.fy += self.vy * dt
+            self.rect.y = int(self.fy)
+            if self.rect.y > game.level_h + 100:
+                self.dead = True
+
+    def draw(self, surf, ox, oy, tiles):
+        pos = (self.rect.x + ox, self.rect.y + oy)
+        if self.kind in ("ground", "pit"):
+            surf.blit(tiles["grass" if self.exposed else "dirt"], pos)
+        elif self.kind in ("brick", "fake"):
+            img = tiles["brick"]
+            if self.kind == "fake" and self.triggered:
+                img = img.copy()
+                img.set_alpha(max(0, self.alpha))
+            surf.blit(img, pos)
+        elif self.kind in ("collapse", "slide"):
+            shake = (random.randint(-1, 1), 0) if (
+                self.kind == "collapse" and self.triggered and not self.falling) else (0, 0)
+            surf.blit(tiles["plank"], (pos[0] + shake[0], pos[1]))
+        elif self.kind == "invisible" and self.revealed:
+            surf.blit(tiles["used"], pos)
+
+
+class Enemy:
+    """Base class for everything that hurts you.  Handles gravity and
+    tile collisions so subclasses only describe behaviour."""
+
+    stompable = True
+    kill_cause = "enemy"
+
+    def __init__(self, x, y, w, h):
+        self.rect = pygame.Rect(int(x), int(y), w, h)
+        self.fx, self.fy = float(x), float(y)
+        self.vx = self.vy = 0.0
+        self.alive = True
+        self.squish = 0.0             # >0 while the flattened body is visible
+        self.dir = -1
+        self.on_ground = False
+        self.hit_wall = False
+        self.t = random.random() * 10
+
+    def move_body(self, game, dt):
+        """Gravity + collision against solid tiles."""
+        rects = game.solid_rects
+        self.vy = min(self.vy + GRAVITY * dt, MAX_FALL)
+        self.fx += self.vx * dt
+        self.rect.x = int(round(self.fx))
+        self.hit_wall = False
+        for i in self.rect.collidelistall(rects):
+            r = rects[i]
+            if not self.rect.colliderect(r):
+                continue
+            if self.vx > 0:
+                self.rect.right = r.left
+            elif self.vx < 0:
+                self.rect.left = r.right
+            else:
+                continue
+            self.fx = float(self.rect.x)
+            self.hit_wall = True
+        self.fy += self.vy * dt
+        self.rect.y = int(round(self.fy))
+        for i in self.rect.collidelistall(rects):
+            r = rects[i]
+            if not self.rect.colliderect(r):
+                continue
+            if self.vy > 0:
+                self.rect.bottom = r.top
+            elif self.vy < 0:
+                self.rect.top = r.bottom
+            else:
+                continue
+            self.fy = float(self.rect.y)
+            self.vy = 0.0
+        self.on_ground = self.rect.move(0, 1).collidelist(rects) != -1
+        if self.rect.top > game.level_h + 200:
+            self.alive = False
+
+    def update(self, game, dt):
+        self.t += dt
+        if self.squish > 0:
+            self.squish -= dt
+
+    def on_stomp(self, game):
+        self.alive = False
+        self.squish = 0.35
+
+    def draw(self, surf, ox, oy):
+        pass
+
+
+class Walker(Enemy):
+    """Patrols back and forth.  The spiky version cannot be stomped."""
+
+    def __init__(self, x, y, spiky=False):
+        super().__init__(x, y, 28, 26)
+        self.spiky = spiky
+        self.stompable = not spiky
+        self.kill_cause = "spike" if spiky else "enemy"
+
+    def update(self, game, dt):
+        super().update(game, dt)
+        if not self.alive:
+            return
+        ahead = pygame.Rect(self.rect.centerx + self.dir * (self.rect.w // 2 + 3),
+                            self.rect.bottom + 3, 2, 2)
+        if self.on_ground and ahead.collidelist(game.solid_rects) == -1:
+            self.dir *= -1                 # turn around at ledges
+        if self.hit_wall:
+            self.dir *= -1
+        self.vx = self.dir * WALKER_SPEED
+        self.move_body(game, dt)
+
+    def draw(self, surf, ox, oy):
+        r = self.rect.move(ox, oy)
+        if not self.alive:                 # flattened
+            flat = pygame.Rect(r.x - 2, r.bottom - 8, r.w + 4, 8)
+            pygame.draw.ellipse(surf, (150, 70, 40), flat)
+            return
+        body_col = (110, 60, 130) if self.spiky else (190, 80, 50)
+        pygame.draw.ellipse(surf, body_col, r)
+        if self.spiky:                     # spikes on the head
+            for i in range(4):
+                x = r.x + 3 + i * 7
+                pygame.draw.polygon(surf, (230, 230, 240),
+                                    [(x, r.y + 6), (x + 3, r.y - 6), (x + 6, r.y + 6)])
+        for dx in (-5, 5):                 # angry eyes
+            pygame.draw.circle(surf, WHITE, (r.centerx + dx, r.y + 11), 4)
+            pygame.draw.circle(surf, BLACK, (r.centerx + dx + self.dir, r.y + 12), 2)
+        pygame.draw.line(surf, BLACK, (r.centerx - 10, r.y + 5), (r.centerx - 2, r.y + 8), 2)
+        pygame.draw.line(surf, BLACK, (r.centerx + 10, r.y + 5), (r.centerx + 2, r.y + 8), 2)
+        step = int(self.t * 8) % 2         # little feet
+        pygame.draw.ellipse(surf, (60, 30, 20), (r.x + 1 + step * 3, r.bottom - 5, 10, 6))
+        pygame.draw.ellipse(surf, (60, 30, 20), (r.right - 11 - step * 3, r.bottom - 5, 10, 6))
+
+
+class Bat(Enemy):
+    """Sleeps until you come close, then flies straight at you."""
+
+    def __init__(self, x, y):
+        super().__init__(x, y, 28, 22)
+        self.awake = False
+
+    def update(self, game, dt):
+        super().update(game, dt)
+        if not self.alive:
+            return
+        p = game.player
+        dx = p.rect.centerx - self.rect.centerx
+        dy = p.rect.centery - self.rect.centery
+        dist = math.hypot(dx, dy)
+        if not self.awake and p.alive and dist < BAT_WAKE_DISTANCE:
+            self.awake = True
+        if self.awake and p.alive and dist > 1:
+            self.fx += dx / dist * BAT_SPEED * dt
+            self.fy += dy / dist * BAT_SPEED * dt + math.sin(self.t * 6) * 0.8
+            self.dir = 1 if dx > 0 else -1
+        elif not self.awake:
+            self.fy += math.sin(self.t * 3) * 0.3
+        self.rect.topleft = (int(self.fx), int(self.fy))
+
+    def draw(self, surf, ox, oy):
+        r = self.rect.move(ox, oy)
+        if not self.alive:
+            pygame.draw.ellipse(surf, (90, 40, 120), (r.x, r.bottom - 7, r.w, 7))
+            return
+        flap = math.sin(self.t * (18 if self.awake else 4)) * 8
+        for side in (-1, 1):               # wings
+            cx = r.centerx + side * 6
+            pygame.draw.polygon(surf, (70, 30, 100), [
+                (cx, r.centery), (cx + side * 16, r.centery - 8 - flap),
+                (cx + side * 14, r.centery + 5)])
+        pygame.draw.ellipse(surf, (110, 50, 150), r)
+        for dx in (-5, 5):
+            pygame.draw.circle(surf, (255, 240, 120) if self.awake else WHITE,
+                               (r.centerx + dx, r.centery - 2), 3)
+            pygame.draw.circle(surf, BLACK, (r.centerx + dx, r.centery - 2), 1)
+
+
+class Dropper(Enemy):
+    """A spiked ball that waits on the ceiling, drops when you walk
+    under it, then slowly rises back up."""
+
+    stompable = False
+    kill_cause = "dropper"
+
+    def __init__(self, x, y):
+        super().__init__(x, y, 30, 30)
+        self.home_y = float(y)
+        self.state = "wait"
+        self.timer = 0.0
+
+    def update(self, game, dt):
+        super().update(game, dt)
+        p = game.player
+        if self.state == "wait":
+            if (p.alive and abs(p.rect.centerx - self.rect.centerx) < DROPPER_TRIGGER
+                    and p.rect.centery > self.rect.centery):
+                self.state, self.vy = "fall", 0.0
+        elif self.state == "fall":
+            self.vy = min(self.vy + DROPPER_GRAVITY * dt, 1400)
+            self.fy += self.vy * dt
+            self.rect.y = int(self.fy)
+            hit = self.rect.collidelist(game.solid_rects)
+            if hit != -1:
+                self.rect.bottom = game.solid_rects[hit].top
+                self.fy = float(self.rect.y)
+                self.state, self.timer = "rest", 0.9
+                game.sfx("thud")
+                game.shake = max(game.shake, 5)
+                game.spawn_burst(self.rect.centerx, self.rect.bottom, (200, 200, 210), 8)
+        elif self.state == "rest":
+            self.timer -= dt
+            if self.timer <= 0:
+                self.state = "rise"
+        elif self.state == "rise":
+            self.fy -= 140 * dt
+            self.rect.y = int(self.fy)
+            if self.fy <= self.home_y:
+                self.fy = self.home_y
+                self.rect.y = int(self.fy)
+                self.state = "wait"
+
+    def draw(self, surf, ox, oy):
+        r = self.rect.move(ox, oy)
+        pygame.draw.line(surf, (90, 90, 100), (r.centerx, -5), (r.centerx, r.centery), 3)
+        pygame.draw.circle(surf, (110, 110, 125), r.center, 15)
+        for a in range(0, 360, 45):        # spikes
+            ang = math.radians(a)
+            tip = (r.centerx + math.cos(ang) * 21, r.centery + math.sin(ang) * 21)
+            b1 = (r.centerx + math.cos(ang + 0.3) * 13, r.centery + math.sin(ang + 0.3) * 13)
+            b2 = (r.centerx + math.cos(ang - 0.3) * 13, r.centery + math.sin(ang - 0.3) * 13)
+            pygame.draw.polygon(surf, (190, 190, 205), [tip, b1, b2])
+        pygame.draw.circle(surf, (60, 60, 70), r.center, 9)
+        pygame.draw.circle(surf, RED, (r.centerx - 3, r.centery - 2), 3)
+        pygame.draw.circle(surf, RED, (r.centerx + 3, r.centery - 2), 3)
+
+
+class Boss(Enemy):
+    """Big angry blob.  Stomp its head three times.  It jumps at you."""
+
+    kill_cause = "boss"
+
+    def __init__(self, x, y, left_bound, right_bound):
+        super().__init__(x, y, 80, 80)
+        self.hp = self.max_hp = 3
+        self.left_bound, self.right_bound = left_bound, right_bound
+        self.invuln = 0.0
+        self.jump_timer = 2.0
+        self.was_air = False
+
+    def update(self, game, dt):
+        super().update(game, dt)
+        if not self.alive:
+            return
+        self.invuln = max(0.0, self.invuln - dt)
+        speed = 70 + (self.max_hp - self.hp) * 35     # gets faster when hurt
+        px = game.player.rect.centerx
+        if self.on_ground:
+            self.vx = self.dir * speed
+            if self.rect.left < self.left_bound:
+                self.dir = 1
+            elif self.rect.right > self.right_bound:
+                self.dir = -1
+            self.jump_timer -= dt
+            if self.jump_timer <= 0:                  # big leaping attack
+                self.vy = -760
+                self.dir = 1 if px > self.rect.centerx else -1
+                self.vx = self.dir * speed * 2.2
+                self.jump_timer = max(1.2, 2.6 - (self.max_hp - self.hp) * 0.5)
+        else:
+            # keep leaps inside the arena
+            if (self.rect.left < self.left_bound and self.vx < 0) or \
+                    (self.rect.right > self.right_bound and self.vx > 0):
+                self.vx = 0
+        self.move_body(game, dt)
+        if self.on_ground and self.was_air:           # landing shockwave
+            game.shake = max(game.shake, 9)
+            game.sfx("thud")
+            game.spawn_burst(self.rect.centerx, self.rect.bottom, (220, 200, 160), 14)
+        self.was_air = not self.on_ground
+
+    def on_stomp(self, game):
+        if self.invuln > 0:
+            return
+        self.hp -= 1
+        self.invuln = 1.3
+        game.shake = max(game.shake, 10)
+        game.sfx("boss")
+        game.spawn_burst(self.rect.centerx, self.rect.top, (255, 120, 80), 24)
+        if self.hp <= 0:
+            self.alive = False
+            self.squish = 0.6
+            game.boss_defeated()
+
+    def draw(self, surf, ox, oy):
+        r = self.rect.move(ox, oy)
+        if not self.alive:
+            pygame.draw.ellipse(surf, (120, 30, 40), (r.x - 6, r.bottom - 14, r.w + 12, 14))
+            return
+        if self.invuln > 0 and int(self.invuln * 14) % 2 == 0:
+            return                                     # blink when hurt
+        pygame.draw.ellipse(surf, (60, 15, 30), r.inflate(6, 6))
+        pygame.draw.ellipse(surf, (170, 35, 55), r)
+        for side in (-1, 1):                           # horns
+            x = r.centerx + side * 26
+            pygame.draw.polygon(surf, (240, 230, 200),
+                                [(x - 8, r.y + 12), (x + side * 8, r.y - 16), (x + 8, r.y + 12)])
+        for dx in (-17, 17):
+            pygame.draw.circle(surf, WHITE, (r.centerx + dx, r.y + 32), 11)
+            pygame.draw.circle(surf, BLACK, (r.centerx + dx + self.dir * 3, r.y + 34), 5)
+        pygame.draw.line(surf, BLACK, (r.centerx - 30, r.y + 18), (r.centerx - 6, r.y + 27), 4)
+        pygame.draw.line(surf, BLACK, (r.centerx + 30, r.y + 18), (r.centerx + 6, r.y + 27), 4)
+        pygame.draw.arc(surf, BLACK, (r.centerx - 20, r.y + 48, 40, 24), 0.4, 2.7, 4)
+
+
+class Trap:
+    """Spikes.  kind 'spike' is always visible; kind 'hidden' pops up out
+    of the floor when the player gets close."""
+
+    def __init__(self, col, row, kind):
+        self.kind = kind
+        self.base = pygame.Rect(col * TILE, row * TILE, TILE, TILE)
+        self.state = "up" if kind == "spike" else "hidden"
+        self.rise = 1.0 if kind == "spike" else 0.0
+
+    def update(self, game, dt):
+        if self.kind != "hidden":
+            return
+        p = game.player
+        if self.state == "hidden":
+            if p.alive and abs(p.rect.centerx - self.base.centerx) < HIDDEN_SPIKE_TRIGGER \
+                    and abs(p.rect.bottom - self.base.bottom) < 90:
+                self.state = "rising"
+                game.sfx("pop")
+        elif self.state == "rising":
+            self.rise = min(1.0, self.rise + dt / 0.07)    # shoots out fast
+            if self.rise >= 1.0:
+                self.state = "up"
+
+    def hurt_rect(self):
+        h = int(TILE * 0.8 * self.rise)
+        return pygame.Rect(self.base.x + 6, self.base.bottom - h, TILE - 12, h)
+
+    @property
+    def dangerous(self):
+        return self.rise > 0.15
+
+    def draw(self, surf, ox, oy):
+        if self.rise <= 0:
+            return
+        h = int(TILE * 0.8 * self.rise)
+        x, bottom = self.base.x + ox, self.base.bottom + oy
+        for i in range(3):                 # three triangles
+            left = x + 2 + i * 11
+            pygame.draw.polygon(surf, (225, 225, 235),
+                                [(left, bottom), (left + 5, bottom - h), (left + 10, bottom)])
+            pygame.draw.polygon(surf, (150, 150, 165),
+                                [(left + 5, bottom - h), (left + 10, bottom), (left + 5, bottom)])
+
+
+class Coin:
+    def __init__(self, col, row):
+        self.key = (col, row)
+        self.rect = pygame.Rect(col * TILE + 11, row * TILE + 11, 14, 14)
+        self.phase = random.random() * 6
+
+    def draw(self, surf, ox, oy, t):
+        bob = math.sin(t * 4 + self.phase) * 3
+        squash = abs(math.cos(t * 3 + self.phase))
+        w = max(3, int(14 * squash))
+        r = pygame.Rect(0, 0, w, 14)
+        r.center = (self.rect.centerx + ox, self.rect.centery + oy + bob)
+        pygame.draw.ellipse(surf, GOLD, r)
+        pygame.draw.ellipse(surf, (200, 140, 20), r, 2)
+
+
+class Goal:
+    """Flag pole.  A fake goal looks identical to a real one but kills you.
+    A real goal in a boss level stays hidden until the boss is beaten."""
+
+    def __init__(self, col, row, fake, hidden=False):
+        self.rect = pygame.Rect(col * TILE + 12, (row - 2) * TILE, 14, 3 * TILE)
+        self.fake = fake
+        self.hidden = hidden
+        self.triggered = False
+
+    def draw(self, surf, ox, oy, t):
+        if self.hidden:
+            return
+        r = self.rect.move(ox, oy)
+        pygame.draw.rect(surf, (230, 230, 235), (r.centerx - 3, r.y, 6, r.h))
+        pygame.draw.circle(surf, GOLD, (r.centerx, r.y), 7)
+        wave = math.sin(t * 5) * 3
+        color = RED if self.triggered else (60, 200, 90)
+        pygame.draw.polygon(surf, color, [
+            (r.centerx + 3, r.y + 4), (r.centerx + 36, r.y + 14 + wave),
+            (r.centerx + 3, r.y + 28)])
+        if self.triggered:
+            pygame.draw.line(surf, WHITE, (r.centerx + 10, r.y + 10), (r.centerx + 22, r.y + 22), 3)
+            pygame.draw.line(surf, WHITE, (r.centerx + 22, r.y + 10), (r.centerx + 10, r.y + 22), 3)
+
+
+class Checkpoint:
+    def __init__(self, col, row):
+        self.rect = pygame.Rect(col * TILE + 8, row * TILE - TILE, 20, TILE * 2)
+        self.active = False
+
+    def draw(self, surf, ox, oy, t):
+        r = self.rect.move(ox, oy)
+        pygame.draw.rect(surf, (150, 150, 160), (r.centerx - 2, r.y + 6, 4, r.h - 6))
+        color = GOLD if self.active else (130, 130, 140)
+        wave = math.sin(t * 6) * 2 if self.active else 0
+        pygame.draw.polygon(surf, color, [(r.centerx + 2, r.y + 8),
+                                          (r.centerx + 22, r.y + 15 + wave),
+                                          (r.centerx + 2, r.y + 22)])
+
+
+class Player:
+    W, H = 24, 30
+
+    def __init__(self, x, y):
+        self.rect = pygame.Rect(int(x), int(y), self.W, self.H)
+        self.fx, self.fy = float(x), float(y)
+        self.vx = self.vy = 0.0
+        self.on_ground = False
+        self.coyote = 0.0
+        self.jump_buf = 0.0
+        self.facing = 1
+        self.alive = True
+        self.squash = 1.0
+        self.run_t = 0.0
+
+    def press_jump(self):
+        self.jump_buf = JUMP_BUFFER
+
+    def update(self, game, dt, left, right, jump_held):
+        axis = (1 if right else 0) - (1 if left else 0)
+        if axis:
+            self.facing = axis
+        # --- horizontal acceleration / friction ---
+        accel = GROUND_ACCEL if self.on_ground else AIR_ACCEL
+        fric = GROUND_FRICTION if self.on_ground else AIR_FRICTION
+        if axis:
+            if self.vx * axis < 0:
+                accel *= 1.6                 # snappy turn-around
+            self.vx = approach(self.vx, axis * MOVE_SPEED, accel * dt)
+        else:
+            self.vx = approach(self.vx, 0.0, fric * dt)
+        # --- coyote time + jump buffer ---
+        self.coyote = COYOTE_TIME if self.on_ground else max(0.0, self.coyote - dt)
+        self.jump_buf = max(0.0, self.jump_buf - dt)
+        if self.jump_buf > 0 and self.coyote > 0:
+            self.vy = -JUMP_SPEED
+            self.jump_buf = self.coyote = 0.0
+            self.squash = 1.25
+            game.sfx("jump")
+            game.spawn_burst(self.rect.centerx, self.rect.bottom, (220, 220, 220), 4, spread=60)
+        # --- gravity (stronger when jump released = variable height) ---
+        g = GRAVITY * (JUMP_CUT if (self.vy < 0 and not jump_held) else 1.0)
+        impact = self.vy
+        self.vy = min(self.vy + g * dt, MAX_FALL)
+
+        rects, plats = game.solid_rects, game.solid_platforms
+        # --- move X ---
+        self.fx += self.vx * dt
+        self.rect.x = int(round(self.fx))
+        for i in self.rect.collidelistall(rects):
+            r = rects[i]
+            if not self.rect.colliderect(r):
+                continue
+            if self.vx > 0:
+                self.rect.right = r.left
+            elif self.vx < 0:
+                self.rect.left = r.right
+            else:
+                continue
+            self.fx = float(self.rect.x)
+            self.vx = 0.0
+            plats[i].on_bump(game)
+        if self.rect.left < 0:
+            self.rect.left, self.fx, self.vx = 0, 0.0, 0.0
+        if self.rect.right > game.level_w:
+            self.rect.right = game.level_w
+            self.fx, self.vx = float(self.rect.x), 0.0
+        # --- move Y ---
+        self.fy += self.vy * dt
+        self.rect.y = int(round(self.fy))
+        for i in self.rect.collidelistall(rects):
+            r = rects[i]
+            if not self.rect.colliderect(r):
+                continue
+            if self.vy > 0:
+                self.rect.bottom = r.top
+            elif self.vy < 0:
+                self.rect.top = r.bottom
+                plats[i].on_bump(game)
+            else:
+                continue
+            self.fy = float(self.rect.y)
+            self.vy = 0.0
+        # --- ground probe (1 pixel below our feet) ---
+        was_ground = self.on_ground
+        probe = self.rect.move(0, 1)
+        hits = probe.collidelistall(rects)
+        self.on_ground = bool(hits) and self.vy >= 0
+        for i in hits:
+            plats[i].on_stand(game, self)
+        if self.on_ground and not was_ground and impact > 350:
+            self.squash = 0.7
+            game.spawn_burst(self.rect.centerx, self.rect.bottom, (220, 220, 220), 5, spread=80)
+        self.squash += (1.0 - self.squash) * min(1.0, 12 * dt)
+        self.run_t += abs(self.vx) * dt * 0.06
+        if self.rect.top > game.level_h + 40:
+            game.kill_player("fall")
+
+    def draw(self, surf, ox, oy):
+        r = self.rect
+        sx = sy = 1.0
+        if not self.on_ground:
+            stretch = clamp(abs(self.vy) / 2500.0, 0, 0.25)
+            sx, sy = 1 - stretch * 0.6, 1 + stretch
+        sy *= self.squash
+        sx *= 2.0 - self.squash
+        w, h = int(r.w * 1.2 * sx), int(r.h * sy)
+        body = pygame.Rect(0, 0, w, h)
+        body.midbottom = (r.centerx + ox, r.bottom + oy)
+        pygame.draw.ellipse(surf, BLOB_DARK, body.inflate(4, 4))
+        pygame.draw.ellipse(surf, BLOB, body)
+        pygame.draw.ellipse(surf, (150, 235, 225), (body.x + w // 5, body.y + h // 8, w // 4, h // 5))
+        ey = body.y + int(h * 0.38)
+        for dx in (-5, 5):
+            ex = body.centerx + dx + self.facing * 3
+            pygame.draw.circle(surf, WHITE, (ex, ey), 5)
+            pygame.draw.circle(surf, BLACK, (ex + self.facing * 2, ey + 1), 2)
+        if self.on_ground and abs(self.vx) > 20:          # tiny running feet
+            s = math.sin(self.run_t) * 4
+        else:
+            s = 0
+        pygame.draw.ellipse(surf, BLOB_DARK, (body.centerx - 10 + s, body.bottom - 4, 9, 6))
+        pygame.draw.ellipse(surf, BLOB_DARK, (body.centerx + 1 - s, body.bottom - 4, 9, 6))
+
+
+# =====================================================================
+# Game - owns the window, the levels, and the main loop
+# =====================================================================
+class Game:
+    def __init__(self):
+        pygame.mixer.pre_init(22050, -16, 1, 512)
+        pygame.init()
+        pygame.display.set_caption("Blobby Is Doomed")
+        self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+        self.clock = pygame.time.Clock()
+        self.font_s = pygame.font.Font(None, 24)
+        self.font_m = pygame.font.Font(None, 36)
+        self.font_l = pygame.font.Font(None, 72)
+        self.font_xl = pygame.font.Font(None, 104)
+        self.sound = SoundBank()
+        self.tiles = self.build_tiles()
+        self.dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
+        self.dim.fill((0, 0, 0, 120))
+        self.hills = self.build_hills()
+        self.backgrounds = {}
+        self.clouds = [(random.randint(0, 2400), random.randint(30, 200), random.uniform(0.7, 1.4))
+                       for _ in range(14)]
+        self.state = "title"
+        self.running = True
+        self.time = 0.0
+        self.shake = 0.0
+        self.particles = []
+        self.level_index = 0
+        self.lives = START_LIVES
+        self.coins = 0
+        self.deaths = 0
+        self.lives_awarded = 0
+        self.cp = None
+        self.level_start_coins = 0
+        self.collected = set()
+        self.taunt = ""
+        self.state_timer = 0.0
+        self.level_time = 0.0
+        self.cam_x = 0.0
+        self.jump_held = False
+        self.boss_dead = False
+        self.toast = ("", 0.0)
+        self.empty_level()
+
+    # ------------------------------------------------------------ setup
+    def build_tiles(self):
+        def base(color):
+            s = pygame.Surface((TILE, TILE)).convert()
+            s.fill(color)
+            return s
+        dirt = base(DIRT)
+        random.seed(7)
+        for _ in range(10):
+            pygame.draw.rect(dirt, DIRT_DARK, (random.randint(2, TILE - 6), random.randint(2, TILE - 6), 4, 3))
+        random.seed()
+        grass = dirt.copy()
+        pygame.draw.rect(grass, GRASS, (0, 0, TILE, 10))
+        pygame.draw.rect(grass, GRASS_LIGHT, (0, 0, TILE, 4))
+        for x in range(2, TILE, 7):
+            pygame.draw.polygon(grass, GRASS, [(x, 9), (x + 3, 14), (x + 6, 9)])
+        brick = base(BRICK)
+        pygame.draw.rect(brick, BRICK_DARK, (0, 0, TILE, TILE), 2)
+        for y in (TILE // 3, 2 * TILE // 3):
+            pygame.draw.line(brick, BRICK_DARK, (0, y), (TILE, y), 2)
+        pygame.draw.line(brick, BRICK_DARK, (TILE // 2, 0), (TILE // 2, TILE // 3), 2)
+        pygame.draw.line(brick, BRICK_DARK, (TILE // 4, TILE // 3), (TILE // 4, 2 * TILE // 3), 2)
+        pygame.draw.line(brick, BRICK_DARK, (3 * TILE // 4, TILE // 3), (3 * TILE // 4, 2 * TILE // 3), 2)
+        pygame.draw.line(brick, BRICK_DARK, (TILE // 2, 2 * TILE // 3), (TILE // 2, TILE), 2)
+        plank = base(PLANK)
+        pygame.draw.rect(plank, PLANK_DARK, (0, 0, TILE, TILE), 2)
+        for y in (12, 24):
+            pygame.draw.line(plank, PLANK_DARK, (2, y), (TILE - 2, y), 1)
+        pygame.draw.circle(plank, PLANK_DARK, (6, 6), 2)
+        pygame.draw.circle(plank, PLANK_DARK, (TILE - 6, 6), 2)
+        used = base(USED)
+        pygame.draw.rect(used, (70, 50, 40), (0, 0, TILE, TILE), 3)
+        pygame.draw.rect(used, (90, 68, 54), (8, 8, TILE - 16, TILE - 16), 2)
+        return {"dirt": dirt, "grass": grass, "brick": brick, "plank": plank, "used": used}
+
+    def build_hills(self):
+        w = 1280
+        s = pygame.Surface((w, 260), pygame.SRCALPHA)
+        random.seed(3)
+        for i in range(9):
+            cx = i * 160 + random.randint(-30, 30)
+            rad = random.randint(90, 170)
+            pygame.draw.circle(s, (60, 110, 90, 150), (cx, 260 + 20), rad)
+        random.seed()
+        return s
+
+    def background_for(self, index):
+        if index not in self.backgrounds:
+            top, bottom = LEVELS[index]["sky"]
+            bg = pygame.Surface((SCREEN_W, SCREEN_H)).convert()
+            for y in range(SCREEN_H):
+                pygame.draw.line(bg, lerp_color(top, bottom, y / SCREEN_H), (0, y), (SCREEN_W, y))
+            self.backgrounds[index] = bg
+        return self.backgrounds[index]
+
+    def empty_level(self):
+        self.platforms, self.solid_platforms, self.solid_rects = [], [], []
+        self.enemies, self.traps, self.coins_list = [], [], []
+        self.goals, self.checkpoints = [], []
+        self.level_w, self.level_h = SCREEN_W, SCREEN_H
+        self.player = Player(0, 0)
+        self.player.alive = False
+
+    # ------------------------------------------------------------ levels
+    def load_level(self, index, use_checkpoint):
+        """Build every object from the ASCII map.  Called at level start
+        and again after each death (so all traps reset)."""
+        rows = list(LEVELS[index]["map"])
+        while len(rows) < ROWS:
+            rows.insert(0, "")                 # pad the sky on top
+        width = max(len(r) for r in rows)
+        grid = [r.ljust(width, ".") for r in rows]
+        self.level_w, self.level_h = width * TILE, len(grid) * TILE
+        self.platforms, self.enemies, self.traps = [], [], []
+        self.coins_list, self.goals, self.checkpoints = [], [], []
+        self.boss_dead = False
+        has_boss = any("B" in r for r in grid)
+        solid_chars = "#=?CWP"
+        tilemap = {}
+        start = (TILE, TILE)
+
+        if use_checkpoint and self.cp:
+            self.collected = set(self.cp["collected"])
+            self.coins = self.cp["coins"]
+        else:
+            self.collected = set()
+            self.coins = self.level_start_coins
+
+        for r, row in enumerate(grid):
+            for c, ch in enumerate(row):
+                x, y = c * TILE, r * TILE
+                above = grid[r - 1][c] if r > 0 else "."
+                exposed = above not in solid_chars
+                kinds = {"#": "ground", "=": "brick", "F": "fake", "?": "invisible",
+                         "C": "collapse", "W": "slide", "P": "pit"}
+                if ch in kinds:
+                    plat = Platform(c, r, kinds[ch], exposed)
+                    self.platforms.append(plat)
+                    tilemap[(c, r)] = plat
+                elif ch == "@":
+                    start = (x + (TILE - Player.W) // 2, y + TILE - Player.H)
+                elif ch == "o":
+                    if (c, r) not in self.collected:
+                        self.coins_list.append(Coin(c, r))
+                elif ch == "e":
+                    self.enemies.append(Walker(x + 4, y + TILE - 26))
+                elif ch == "w":
+                    self.enemies.append(Walker(x + 4, y + TILE - 26, spiky=True))
+                elif ch == "b":
+                    self.enemies.append(Bat(x + 4, y + 8))
+                elif ch == "d":
+                    self.enemies.append(Dropper(x + 3, y + 3))
+                elif ch == "B":
+                    cx = x + TILE // 2
+                    self.enemies.append(Boss(cx - 40, y + TILE - 80,
+                                             cx - 7 * TILE, cx + 7 * TILE))
+                elif ch == "^":
+                    self.traps.append(Trap(c, r, "hidden"))
+                elif ch == "S":
+                    self.traps.append(Trap(c, r, "spike"))
+                elif ch == "K":
+                    cp = Checkpoint(c, r)
+                    self.checkpoints.append(cp)
+                elif ch == "G":
+                    self.goals.append(Goal(c, r, fake=False, hidden=has_boss))
+                elif ch == "X":
+                    self.goals.append(Goal(c, r, fake=True))
+
+        # sliding planks that touch each other move as one piece
+        for (c, r), plat in tilemap.items():
+            if plat.kind == "slide":
+                left = tilemap.get((c - 1, r))
+                if left and left.kind == "slide":
+                    plat.group = left.group
+                    left.group.append(plat)
+
+        if use_checkpoint and self.cp:
+            start = self.cp["pos"]
+            for cp in self.checkpoints:
+                if cp.rect.x <= self.cp["x"]:
+                    cp.active = True
+        self.player = Player(*start)
+        self.refresh_solids()
+        self.cam_x = clamp(self.player.rect.centerx - SCREEN_W * 0.4, 0, self.level_w - SCREEN_W)
+        self.level_time = 0.0
+        self.particles = []
+
+    def refresh_solids(self):
+        self.platforms = [p for p in self.platforms if not p.dead]
+        self.solid_platforms = [p for p in self.platforms if p.solid]
+        self.solid_rects = [p.rect for p in self.solid_platforms]
+
+    def start_game(self):
+        self.lives, self.coins, self.deaths = START_LIVES, 0, 0
+        self.lives_awarded = 0
+        self.level_index = 0
+        self.begin_level()
+
+    def begin_level(self):
+        self.cp = None
+        self.level_start_coins = self.coins
+        self.load_level(self.level_index, use_checkpoint=False)
+        self.state = "playing"
+
+    def restart_level(self):
+        self.cp = None
+        self.load_level(self.level_index, use_checkpoint=False)
+        self.state = "playing"
+
+    # ------------------------------------------------------------ events
+    def sfx(self, name):
+        self.sound.play(name)
+
+    def spawn_burst(self, x, y, color, count, spread=220, up=True):
+        for _ in range(count):
+            if len(self.particles) > 400:
+                return
+            ang = random.uniform(0, math.tau)
+            sp = random.uniform(0.3, 1.0) * spread
+            self.particles.append(Particle(
+                x, y, math.cos(ang) * sp, math.sin(ang) * sp - (80 if up else 0),
+                random.uniform(0.35, 0.8), color, random.randint(3, 6)))
+
+    def kill_player(self, cause):
+        if self.state != "playing" or not self.player.alive:
+            return
+        self.player.alive = False
+        self.deaths += 1
+        self.lives -= 1
+        self.taunt = random.choice(TAUNTS.get(cause, TAUNTS["generic"]))
+        self.state, self.state_timer = "dying", DEATH_TIME
+        self.shake = 14
+        r = self.player.rect
+        self.spawn_burst(r.centerx, r.centery, BLOB, 26, spread=320)
+        self.spawn_burst(r.centerx, r.centery, WHITE, 10, spread=260)
+        self.sfx("death")
+
+    def boss_defeated(self):
+        self.boss_dead = True
+        for g in self.goals:
+            g.hidden = False
+            self.spawn_burst(g.rect.centerx, g.rect.centery, GOLD, 30, spread=300)
+        self.toast = ("The boss is down... the goal appeared!", 3.0)
+
+    def level_clear(self):
+        self.state, self.state_timer = "levelclear", LEVEL_CLEAR_TIME
+        self.sfx("win")
+        r = self.player.rect
+        for color in (GOLD, (255, 120, 120), (120, 255, 150), (120, 180, 255)):
+            self.spawn_burst(r.centerx, r.centery, color, 25, spread=380)
+
+    def handle_events(self):
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                self.running = False
+            elif ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    self.running = False
+                elif ev.key == pygame.K_m:
+                    self.sound.toggle()
+                elif ev.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
+                    if self.state == "playing":
+                        self.player.press_jump()
+                    elif self.state == "title":
+                        self.start_game()
+                elif ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    if self.state == "title":
+                        self.start_game()
+                    elif self.state in ("gameover", "win"):
+                        self.state = "title"
+                elif ev.key == pygame.K_r:
+                    if self.state in ("playing", "dying") and self.lives > 0:
+                        self.restart_level()
+                    elif self.state in ("gameover", "win"):
+                        self.state = "title"
+
+    # ------------------------------------------------------------ update
+    def update(self, dt):
+        self.time += dt
+        self.shake = max(0.0, self.shake - 30 * dt)
+        if self.toast[1] > 0:
+            self.toast = (self.toast[0], self.toast[1] - dt)
+        for p in self.particles:
+            p.update(dt)
+        self.particles = [p for p in self.particles if p.life > 0]
+
+        if self.state == "playing":
+            self.update_playing(dt)
+        elif self.state == "dying":
+            self.state_timer -= dt
+            if self.state_timer <= 0:
+                if self.lives <= 0:
+                    self.state = "gameover"
+                else:
+                    self.load_level(self.level_index, use_checkpoint=True)
+                    self.state, self.state_timer = "respawn", RESPAWN_TIME
+        elif self.state == "respawn":
+            self.state_timer -= dt
+            if self.state_timer <= 0:
+                self.state = "playing"
+        elif self.state == "levelclear":
+            self.state_timer -= dt
+            if self.state_timer <= 0:
+                self.level_index += 1
+                if self.level_index >= len(LEVELS):
+                    self.state = "win"
+                    self.sfx("win")
+                else:
+                    self.begin_level()
+
+    def update_playing(self, dt):
+        keys = pygame.key.get_pressed()
+        left = keys[pygame.K_LEFT] or keys[pygame.K_a]
+        right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
+        self.jump_held = keys[pygame.K_SPACE] or keys[pygame.K_UP] or keys[pygame.K_w]
+        self.level_time += dt
+        p = self.player
+        view_l, view_r = self.cam_x - 400, self.cam_x + SCREEN_W + 400
+
+        for plat in self.platforms:
+            if view_l < plat.rect.x < view_r or plat.falling or plat.triggered:
+                plat.update(self, dt)
+        if any(pl.dead for pl in self.platforms):
+            self.refresh_solids()
+        else:
+            self.solid_platforms = [pl for pl in self.platforms if pl.solid]
+            self.solid_rects = [pl.rect for pl in self.solid_platforms]
+
+        p.update(self, dt, left, right, self.jump_held)
+        if self.state != "playing":
+            return
+
+        for t in self.traps:
+            if view_l < t.base.x < view_r:
+                t.update(self, dt)
+                if t.dangerous and t.hurt_rect().colliderect(p.rect):
+                    self.kill_player("hidden" if t.kind == "hidden" else "spike")
+                    return
+
+        for e in self.enemies:
+            if e.alive and view_l < e.rect.x < view_r:
+                e.update(self, dt)
+            elif not e.alive and e.squish > 0:
+                e.update(self, dt)
+        for e in self.enemies:
+            if not e.alive or not e.rect.colliderect(p.rect):
+                continue
+            from_above = p.vy > 0 and (p.rect.bottom - e.rect.top) < max(14, p.vy * STEP * 1.6 + 8)
+            if e.stompable and from_above:
+                e.on_stomp(self)
+                p.vy = -(STOMP_BOUNCE_HELD if self.jump_held else STOMP_BOUNCE)
+                p.fy = float(p.rect.y)
+                self.sfx("stomp")
+                self.spawn_burst(e.rect.centerx, e.rect.top, (255, 220, 150), 8)
+            else:
+                self.kill_player(e.kill_cause)
+                return
+        self.enemies = [e for e in self.enemies if e.alive or e.squish > 0]
+
+        for c in self.coins_list[:]:
+            if c.rect.colliderect(p.rect):
+                self.coins_list.remove(c)
+                self.collected.add(c.key)
+                self.coins += 1
+                self.sfx("coin")
+                self.spawn_burst(c.rect.centerx, c.rect.centery, GOLD, 8, spread=140)
+                if self.coins // COIN_LIFE > self.lives_awarded:
+                    self.lives_awarded += 1
+                    self.lives += 1
+                    self.sfx("oneup")
+                    self.toast = ("1UP!  Extra life!", 2.0)
+
+        for cp in self.checkpoints:
+            if not cp.active and cp.rect.colliderect(p.rect):
+                cp.active = True
+                self.cp = {"pos": (cp.rect.x + 2, cp.rect.bottom - Player.H - 1),
+                           "x": cp.rect.x, "coins": self.coins,
+                           "collected": set(self.collected)}
+                self.toast = ("Checkpoint!", 1.6)
+                self.sfx("check")
+                self.spawn_burst(cp.rect.centerx, cp.rect.top, GOLD, 12)
+
+        for g in self.goals:
+            if not g.hidden and g.rect.colliderect(p.rect):
+                if g.fake:
+                    g.triggered = True
+                    self.kill_player("fakegoal")
+                else:
+                    self.level_clear()
+                return
+
+        target = clamp(p.rect.centerx - SCREEN_W * 0.4, 0, self.level_w - SCREEN_W)
+        self.cam_x += (target - self.cam_x) * min(1.0, 6 * dt)
+
+    # ------------------------------------------------------------ drawing
+    def draw_text(self, text, font, color, x, y, center=True, shadow=True):
+        if shadow:
+            img = font.render(text, True, (0, 0, 0))
+            rect = img.get_rect(center=(x + 2, y + 2)) if center else img.get_rect(topleft=(x + 2, y + 2))
+            self.screen.blit(img, rect)
+        img = font.render(text, True, color)
+        rect = img.get_rect(center=(x, y)) if center else img.get_rect(topleft=(x, y))
+        self.screen.blit(img, rect)
+
+    def draw_world(self):
+        scr = self.screen
+        scr.blit(self.background_for(self.level_index), (0, 0))
+        cam = self.cam_x
+        # parallax hills and clouds
+        hx = -int(cam * 0.25) % 1280
+        scr.blit(self.hills, (hx - 1280, SCREEN_H - 270))
+        scr.blit(self.hills, (hx, SCREEN_H - 270))
+        if self.level_index != 2:                        # no clouds at night
+            for cx, cy, sc in self.clouds:
+                x = (cx - cam * 0.5) % (SCREEN_W + 300) - 150
+                pygame.draw.ellipse(scr, (255, 255, 255), (x, cy, 90 * sc, 30 * sc))
+                pygame.draw.ellipse(scr, (255, 255, 255), (x + 20 * sc, cy - 14 * sc, 50 * sc, 30 * sc))
+        else:
+            random.seed(11)
+            for _ in range(50):
+                sx, sy = random.randint(0, SCREEN_W), random.randint(0, 300)
+                pygame.draw.circle(scr, (255, 255, 230), (int((sx - cam * 0.1) % SCREEN_W), sy), 1)
+            random.seed()
+
+        sx = sy = 0
+        if self.shake > 0:
+            sx = random.randint(-int(self.shake), int(self.shake))
+            sy = random.randint(-int(self.shake), int(self.shake))
+        ox, oy = -int(cam) + sx, sy
+        vis = pygame.Rect(int(cam) - 80, -80, SCREEN_W + 160, SCREEN_H + 160)
+
+        for plat in self.platforms:
+            if plat.rect.colliderect(vis):
+                plat.draw(scr, ox, oy, self.tiles)
+        for t in self.traps:
+            if t.base.colliderect(vis):
+                t.draw(scr, ox, oy)
+        for cp in self.checkpoints:
+            cp.draw(scr, ox, oy, self.time)
+        for g in self.goals:
+            g.draw(scr, ox, oy, self.time)
+        for c in self.coins_list:
+            if c.rect.colliderect(vis):
+                c.draw(scr, ox, oy, self.time)
+        for e in self.enemies:
+            if e.rect.colliderect(vis):
+                e.draw(scr, ox, oy)
+        if self.state in ("playing", "levelclear"):
+            self.player.draw(scr, ox, oy)
+        elif self.state == "respawn":
+            self.draw_respawn(ox, oy)
+        for p in self.particles:
+            p.draw(scr, ox, oy)
+
+    def draw_respawn(self, ox, oy):
+        """Blob materialises inside a shrinking ring."""
+        t = 1.0 - clamp(self.state_timer / RESPAWN_TIME, 0, 1)
+        r = self.player.rect
+        cx, cy = r.centerx + ox, r.centery + oy
+        ring = int((1 - t) * 70) + 8
+        pygame.draw.circle(self.screen, WHITE, (cx, cy), ring, 2)
+        pygame.draw.circle(self.screen, BLOB, (cx, cy), ring // 2, 1)
+        k = t * t * (3 - 2 * t)                          # smoothstep
+        w, h = max(2, int(r.w * 1.2 * k)), max(2, int(r.h * k))
+        body = pygame.Rect(0, 0, w, h)
+        body.midbottom = (cx, r.bottom + oy)
+        pygame.draw.ellipse(self.screen, BLOB, body)
+        if random.random() < 0.5:
+            a = random.uniform(0, math.tau)
+            self.particles.append(Particle(cx + math.cos(a) * ring, cy + math.sin(a) * ring,
+                                           -math.cos(a) * 60, -math.sin(a) * 60, 0.3, BLOB, 3, 0))
+
+    def draw_hud(self):
+        scr = self.screen
+        pygame.draw.ellipse(scr, BLOB, (14, 12, 22, 22))
+        pygame.draw.circle(scr, WHITE, (21, 21), 3)
+        pygame.draw.circle(scr, WHITE, (29, 21), 3)
+        self.draw_text(f"x {max(0, self.lives)}", self.font_m, HUD_TEXT, 44, 14, center=False)
+        pygame.draw.circle(scr, GOLD, (130, 24), 10)
+        pygame.draw.circle(scr, (200, 140, 20), (130, 24), 10, 2)
+        self.draw_text(f"x {self.coins}", self.font_m, HUD_TEXT, 146, 14, center=False)
+        self.draw_text(f"Deaths: {self.deaths}", self.font_m, (255, 150, 150), 236, 14, center=False)
+        title = f"World {self.level_index + 1}: {LEVELS[self.level_index]['name']}"
+        self.draw_text(title, self.font_s, HUD_TEXT, SCREEN_W - 14 - self.font_s.size(title)[0], 16, center=False)
+        if not self.sound.enabled:
+            self.draw_text("muted (M)", self.font_s, (200, 200, 200), SCREEN_W - 100, 40, center=False)
+        for e in self.enemies:                            # boss health bar
+            if isinstance(e, Boss) and e.alive and abs(e.rect.centerx - self.player.rect.centerx) < 700:
+                x = SCREEN_W // 2 - 120
+                pygame.draw.rect(scr, (40, 10, 10), (x - 3, 57, 246, 22))
+                pygame.draw.rect(scr, RED, (x, 60, int(240 * e.hp / e.max_hp), 16))
+                self.draw_text("BOSS", self.font_s, WHITE, SCREEN_W // 2, 68)
+        if self.state == "playing" and self.level_time < 3.0:
+            alpha_t = clamp(3.0 - self.level_time, 0, 1)
+            col = lerp_color((0, 0, 0), WHITE, alpha_t) if alpha_t < 1 else WHITE
+            self.draw_text(f"World {self.level_index + 1}: {LEVELS[self.level_index]['name']}",
+                           self.font_l, col, SCREEN_W // 2, 150)
+            self.draw_text(LEVELS[self.level_index]["hint"], self.font_m, col, SCREEN_W // 2, 200)
+        if self.toast[1] > 0:
+            self.draw_text(self.toast[0], self.font_m, GOLD, SCREEN_W // 2, 110)
+
+    def draw_title(self):
+        scr = self.screen
+        scr.blit(self.background_for(0), (0, 0))
+        scr.blit(self.hills, (0, SCREEN_H - 270))
+        pygame.draw.rect(scr, DIRT, (0, SCREEN_H - 90, SCREEN_W, 90))
+        pygame.draw.rect(scr, GRASS, (0, SCREEN_H - 90, SCREEN_W, 14))
+        bob = math.sin(self.time * 3) * 10
+        for i, ch in enumerate("BLOBBY IS DOOMED"):       # wobbling title letters
+            img = self.font_xl.render(ch, True, WHITE)
+            x = SCREEN_W // 2 - 380 + i * 47
+            y = 110 + math.sin(self.time * 3 + i * 0.5) * 8
+            shadow = self.font_xl.render(ch, True, (30, 60, 90))
+            scr.blit(shadow, (x + 4, y + 4))
+            scr.blit(img, (x, y))
+        # bouncing blob mascot
+        cx, cy = SCREEN_W // 2, SCREEN_H - 95 - abs(math.sin(self.time * 3)) * 70
+        pygame.draw.ellipse(scr, BLOB_DARK, (cx - 30, cy - 52, 60, 56))
+        pygame.draw.ellipse(scr, BLOB, (cx - 28, cy - 50, 56, 52))
+        for dx in (-10, 10):
+            pygame.draw.circle(scr, WHITE, (cx + dx, cy - 30), 8)
+            pygame.draw.circle(scr, BLACK, (cx + dx + 2, cy - 29), 3)
+        self.draw_text("An impossible platformer. Trust nothing.", self.font_m, WHITE, SCREEN_W // 2, 235)
+        if int(self.time * 2) % 2 == 0:
+            self.draw_text("Press ENTER or SPACE to start", self.font_m, GOLD, SCREEN_W // 2, 300)
+        lines = ["Arrows / A D: move     Space / Up / W: jump (hold = higher)",
+                 "R: restart level       M: mute       Esc: quit"]
+        for i, line in enumerate(lines):
+            self.draw_text(line, self.font_s, WHITE, SCREEN_W // 2, 350 + i * 26)
+
+    def draw_end_screen(self, title, color, lines):
+        scr = self.screen
+        scr.fill((18, 14, 30))
+        self.draw_text(title, self.font_xl, color, SCREEN_W // 2, 130)
+        for i, line in enumerate(lines):
+            self.draw_text(line, self.font_m, WHITE, SCREEN_W // 2, 230 + i * 44)
+        if int(self.time * 2) % 2 == 0:
+            self.draw_text("Press ENTER for the title screen", self.font_m, GOLD, SCREEN_W // 2, 460)
+
+    def draw(self):
+        if self.state == "title":
+            self.draw_title()
+        elif self.state == "gameover":
+            self.draw_end_screen("GAME OVER", RED, [
+                f"You died {self.deaths} times.",
+                f"Coins collected: {self.coins}",
+                "Honestly? Pretty impressive.",
+                "The game was impossible. We warned you."])
+        elif self.state == "win":
+            self.draw_end_screen("YOU WON?!", GOLD, [
+                "You beat the impossible game!",
+                f"Deaths: {self.deaths}      Coins: {self.coins}",
+                "Nobody believed it could be done.",
+                "(Neither did we.)"])
+        else:
+            self.draw_world()
+            self.draw_hud()
+            if self.state == "dying":
+                self.screen.blit(self.dim, (0, 0))
+                self.draw_text(self.taunt, self.font_l, WHITE, SCREEN_W // 2, SCREEN_H // 2 - 30)
+                self.draw_text(f"Deaths: {self.deaths}    Lives left: {max(0, self.lives)}",
+                               self.font_m, (255, 190, 190), SCREEN_W // 2, SCREEN_H // 2 + 30)
+            elif self.state == "levelclear":
+                self.draw_text("LEVEL CLEAR!", self.font_xl, GOLD, SCREEN_W // 2, SCREEN_H // 2 - 20)
+                self.draw_text(f"Deaths so far: {self.deaths}", self.font_m, WHITE,
+                               SCREEN_W // 2, SCREEN_H // 2 + 40)
+        pygame.display.flip()
+
+    # ------------------------------------------------------------ main loop
+    def run(self):
+        accumulator = 0.0
+        while self.running:
+            frame = self.clock.tick(FPS) / 1000.0
+            accumulator += min(frame, 0.25)       # cap so lag can't spiral
+            self.handle_events()
+            while accumulator >= STEP:            # fixed-step physics
+                self.update(STEP)
+                accumulator -= STEP
+            self.draw()
+        pygame.quit()
+
+
+def main():
+    Game().run()
+
+
+if __name__ == "__main__":
+    main()
+    sys.exit(0)
